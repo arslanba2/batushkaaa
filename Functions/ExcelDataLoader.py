@@ -114,13 +114,13 @@ class ExcelDataLoader:
             return e
 
     def read_workers_from_excel(self, _excel_path):
-
         self.__excel_path = _excel_path
 
         try:
             wb = openpyxl.load_workbook(self.__excel_path)
             sheet_workers = wb["Çalışan Vardiya Matrisi"]
             sheet_qualifications = wb["Çalışan Yetenek Matrisi"]
+
             for row in range(2, sheet_workers.max_row + 1):
                 w = Worker()
                 w.set_registration_number(str(sheet_workers.cell(row=row, column=2).value))
@@ -131,7 +131,11 @@ class ExcelDataLoader:
                 for col in range(6, sheet_workers.max_column + 1):
                     cell_value = sheet_workers.cell(row=1, column=col).value
                     shift_type = sheet_workers.cell(row=row, column=col).value
+
                     if shift_type is not None:
+                        # Vardiya türünü büyük harfe çevir (I1 -> I1, I2 -> I2)
+                        shift_type = shift_type.upper()
+
                         # SHIFT_SCHEDULES sözlüğünden zaman aralıklarını al
                         shift_intervals = SHIFT_SCHEDULES.get(self.__working_order, {}).get(shift_type, [])
 
@@ -140,12 +144,14 @@ class ExcelDataLoader:
                             print(
                                 f"Warning: No intervals found for working order '{self.__working_order}' and shift type '{shift_type}'")
 
+                        # Tarih ve vardiya bilgilerini shift_schedule'a ekle
                         shift_schedule.append([cell_value, shift_type, shift_intervals])
 
-                    w.set_shift_schedule(shift_schedule)
+                # Çalışanın vardiya bilgilerini ayarla
+                w.set_shift_schedule(shift_schedule)
 
+                # Çalışanın yeteneklerini ve kısıtlamalarını oku
                 restriction_list = []
-
                 for skill_row in range(2, sheet_qualifications.max_row + 1):
                     skill_worker_id = str(sheet_qualifications.cell(row=skill_row, column=2).value)
                     if skill_worker_id == w.get_registration_number():
@@ -157,7 +163,9 @@ class ExcelDataLoader:
                             w.set_restrictions(restriction_list)
                         break
 
+                # Çalışanı listeye ekle
                 self.__workers.append(w)
+
             wb.close()
             return 1
         except Exception as e:

@@ -311,24 +311,13 @@ class MainController:
             # Tamamlanmamış kritik operasyonları al
             incomplete_critical_ops = [op for op in critical_ops if not op.get_completed()]
 
-            # İki gruba ayır: tamamlanmamış öncülü olmayanlar ve olanlar
-            ops_with_no_preds = []
-            ops_with_preds = []
+            # Operasyonları öncül sayılarına ve isimlerine göre sırala
+            incomplete_critical_ops.sort(key=lambda op:
+            (len(op.get_uncompleted_prdecessors() or []), op.get_name()))
 
+            # Sıralanmış operasyonları listeye ekle
             for op in incomplete_critical_ops:
-                if not op.get_uncompleted_prdecessors() or len(op.get_uncompleted_prdecessors()) == 0:
-                    ops_with_no_preds.append((product, op))
-                else:
-                    # Tamamlanmamış öncüllerin sayısına göre sırala (daha az öncülü olanları önce)
-                    op.remaining_pred_count = len(op.get_uncompleted_prdecessors())
-                    ops_with_preds.append((product, op))
-
-            # Öncülü olmayanları ekle
-            self.__all_critical_operations.extend(ops_with_no_preds)
-
-            # Öncülü olanları tamamlanmamış öncül sayısına göre sırala
-            ops_with_preds.sort(key=lambda x: getattr(x[1], 'remaining_pred_count', float('inf')))
-            self.__all_critical_operations.extend(ops_with_preds)
+                self.__all_critical_operations.append((product, op))
 
         print(f"Toplam {len(self.__all_critical_operations)} kritik operasyon toplandı.")
 
@@ -341,7 +330,8 @@ class MainController:
             print(f"  {idx + 1}. Ürün: {product.get_serial_number()}, Operasyon: {op.get_name()}")
             print(f"     Tüm öncüller: {all_preds}")
             print(f"     Tamamlanmamış öncüller: {uncompleted_preds}")
-            print(f"     Tamamlanmamış öncül sayısı: {getattr(op, 'remaining_pred_count', 'Bilinmiyor')}")
+            print(f"     Tamamlanmamış öncül sayısı: {len(uncompleted_preds)}")
+
     def sort_operations_by_duration(self):
         for product in self.__products:
             criticalops = product.get_critical_operations()
@@ -365,90 +355,177 @@ class MainController:
     def assign_workers_to_time_intervals(self):
         """
         Çalışanları zaman aralıklarına atar.
+        Çalışanların YALNIZCA kendi vardiyalarında çalışması sağlanır.
         """
         if not self.__ScheduleObject or not self.__workers:
             print("HATA: Schedule veya çalışan listesi boş.")
             return
-    
+
         print(f"\n--- ÇALIŞANLARI ZAMAN ARALIKLARINA ATAMA ---")
-        print(f"Toplam çalışan sayısı: {len(self.__workers)}")
-        
-        # Her bir çalışanın vardiya bilgilerini kontrol et
-        for worker_idx, worker in enumerate(self.__workers):
-            print(f"Çalışan {worker_idx+1}: {worker.get_name()} ({worker.get_registration_number()})")
-            shift_schedule = worker.get_shift_schedule() or []
-            print(f"  Vardiya sayısı: {len(shift_schedule)}")
-            
-            # Çalışanın vardiya bilgilerini göster
-            for shift_entry in shift_schedule:
-                if len(shift_entry) >= 3:
-                    schedule_date, schedule_shift, available_hours = shift_entry
-                    print(f"  Vardiya: {schedule_shift}, Tarih: {schedule_date}, Saatler: {len(available_hours)}")
-        
-        # Her tarih için
+
+        # Tüm zaman aralıklarını temizle - tüm önceki atamaları sıfırla
         for date_obj in self.__ScheduleObject.dates:
-            date_str = date_obj.get_date().strftime('%d.%m.%Y') if hasattr(date_obj, 'get_date') and callable(date_obj.get_date) else "Bilinmiyor"
-            print(f"\nTarih: {date_str}")
-            
-            # Her zaman aralığı için
             for time_interval in date_obj.time_intervals:
-                interval_start = time_interval.interval[0].strftime('%H:%M')
-                interval_end = time_interval.interval[1].strftime('%H:%M')
-                print(f"  Vardiya: {time_interval.shift}, Saat: {interval_start}-{interval_end}")
-                
-                # Time interval'ın tarih bilgisini ayarla (referans hatası önlemek için)
-                time_interval.date = date_obj.get_date()
-                
-                # Uygun çalışanları bul
-                available_workers = []
-                for worker in self.__workers:
-                    # Çalışanın off-day'lerini kontrol et
-                    off_days = worker.get_off_days()
-                    is_offday = False
-                    
-                    if off_days:
-                        # Off-day formatını kontrol et
-                        try:
-                            off_start_date = datetime.strptime(off_days[0], "%d.%m.%Y").date()
-                            off_end_date = datetime.strptime(off_days[1], "%d.%m.%Y").date()
-                            current_date = time_interval.date
-                            if off_start_date <= current_date <= off_end_date:
-                                is_offday = True
-                        except Exception as e:
-                            print(f"    Çalışan {worker.get_name()} için off-day formatı hatası: {e}")
-                    
-                    if is_offday:
-                        continue  # Çalışan bu tarihte off-day'de, atama yapma
-                    
-                    # Vardiya planını kontrol et
-                    is_available = False
-                    for schedule_entry in worker.get_shift_schedule() or []:
-                        if len(schedule_entry) < 3:
-                            continue  # Geçersiz vardiya formatı, atla
-                            
-                        schedule_date, schedule_shift, available_hours = schedule_entry
-                        
-                        # Tarih ve vardiya eşleşiyor mu kontrol et
-                        if schedule_date == time_interval.date and schedule_shift == time_interval.shift:
-                            # Zaman aralığı da uyuyor mu kontrol et
-                            for hours in available_hours:
-                                if hours[0] <= time_interval.interval[0] and hours[1] >= time_interval.interval[1]:
-                                    is_available = True
+                time_interval.available_workers = []
+
+        # Her bir çalışan için hangi zaman aralıklarında çalışabileceğini belirle
+        for worker in self.__workers:
+            worker_name = worker.get_name()
+            worker_id = worker.get_registration_number()
+            shift_schedule = worker.get_shift_schedule() or []
+
+            print(f"\nÇalışan: {worker_name} ({worker_id})")
+            print(f"  Vardiya kayıtları: {len(shift_schedule)}")
+
+            # İzin günlerini kontrol et
+            off_days = worker.get_off_days()
+            off_period = None
+            if off_days:
+                try:
+                    off_start = datetime.strptime(off_days[0], "%d.%m.%Y").date()
+                    off_end = datetime.strptime(off_days[1], "%d.%m.%Y").date()
+                    off_period = (off_start, off_end)
+                    print(f"  İzin günleri: {off_days[0]} - {off_days[1]}")
+                except Exception as e:
+                    print(f"  İzin günü formatı hatası: {e}")
+
+            # Her zaman aralığı için kontrol et
+            for date_obj in self.__ScheduleObject.dates:
+                current_date = date_obj.get_date()
+                date_str = current_date.strftime('%d.%m.%Y') if current_date else "Bilinmiyor"
+
+                # İzin günlerini kontrol et
+                if off_period and (off_period[0] <= current_date.date() <= off_period[1]):
+                    print(f"  {date_str} tarihinde izinli, atama yapılmıyor.")
+                    continue
+
+                for time_interval in date_obj.time_intervals:
+                    # Mevcut zaman aralığının bilgilerini al
+                    current_shift = time_interval.shift.upper()  # Vardiya ismini büyük harfe çevir
+                    interval_start = time_interval.interval[0]
+                    interval_end = time_interval.interval[1]
+                    time_str = f"{interval_start.strftime('%H:%M')}-{interval_end.strftime('%H:%M')}"
+
+                    # Çalışanın bu vardiyada çalışabilirliğini kontrol et
+                    can_work = False
+                    matching_entry = None
+
+                    for shift_entry in shift_schedule:
+                        if len(shift_entry) < 3:
+                            continue
+
+                        entry_date, entry_shift, entry_hours = shift_entry
+                        entry_shift = entry_shift.upper()  # Vardiya ismini büyük harfe çevir
+
+                        # Tarih ve vardiya kontrolü - ÖNEMLİ! Tam eşleşme olmalı
+                        if self._same_date(entry_date, current_date) and entry_shift == current_shift:
+                            # Bu çalışan bu tarihte ve vardiyada çalışabilir
+                            for hour_range in entry_hours:
+                                range_start, range_end = hour_range
+                                # Zaman aralığı vardiya saatleri içinde mi kontrol et
+                                if range_start <= interval_start and interval_end <= range_end:
+                                    can_work = True
+                                    matching_entry = shift_entry
                                     break
-                    
-                    if is_available:
-                        available_workers.append(worker)
-                
-                # Uygun çalışan sayısını göster
-                print(f"    Uygun çalışan sayısı: {len(available_workers)}")
-                if available_workers:
-                    print(f"    Uygun çalışanlar: {', '.join([w.get_name() for w in available_workers])}")
-                
-                # TimeInterval'ın available_workers listesini güncelle
-                time_interval.available_workers = available_workers
-        
+
+                        if can_work:
+                            break
+
+                    # Sonuçları göster ve çalışanı ata veya atama
+                    if can_work and matching_entry:
+                        entry_date, entry_shift, _ = matching_entry
+                        entry_date_str = entry_date.strftime('%d.%m.%Y') if isinstance(entry_date, datetime) else str(
+                            entry_date)
+                        print(
+                            f"  UYGUN: {date_str}, {current_shift}, {time_str} - Vardiya kaydı: {entry_date_str}, {entry_shift}")
+
+                        # Çalışanı zaman aralığına ekle
+                        if worker not in time_interval.available_workers:
+                            time_interval.available_workers.append(worker)
+                    else:
+                        entry_info = "Eşleşen kayıt bulunamadı" if not matching_entry else f"{matching_entry[0]}, {matching_entry[1]}"
+                        print(f"  UYGUN DEĞİL: {date_str}, {current_shift}, {time_str} - {entry_info}")
+
+        # Özet rapor göster
+        print("\nZaman Aralıkları ve Atanan Çalışanlar:")
+        for date_obj in self.__ScheduleObject.dates:
+            current_date = date_obj.get_date()
+            date_str = current_date.strftime('%d.%m.%Y') if current_date else "Bilinmiyor"
+
+            for time_interval in date_obj.time_intervals:
+                shift = time_interval.shift
+                time_str = f"{time_interval.interval[0].strftime('%H:%M')}-{time_interval.interval[1].strftime('%H:%M')}"
+                worker_count = len(time_interval.available_workers or [])
+                worker_names = ", ".join([w.get_name() for w in (time_interval.available_workers or [])[:3]])
+
+                if worker_count > 3:
+                    worker_names += f" ve {worker_count - 3} diğer"
+
+                print(f"  {date_str}, {shift}, {time_str}: {worker_count} çalışan ({worker_names})")
+
         print("--- ÇALIŞANLARI ZAMAN ARALIKLARINA ATAMA TAMAMLANDI ---\n")
 
+    def _same_date(self, date1, date2):
+        """İki tarihin aynı gün olup olmadığını kontrol eder (tarih formatlarını standartlaştır)."""
+        try:
+            # Tarihleri datetime.date nesnesine dönüştür
+            def to_date(d):
+                if isinstance(d, datetime):
+                    return d.date()
+                elif isinstance(d, str):
+                    return datetime.strptime(d, "%d.%m.%Y").date()
+                elif hasattr(d, 'date'):
+                    return d.date()
+                else:
+                    return None
+
+            date1_obj = to_date(date1)
+            date2_obj = to_date(date2)
+
+            if not date1_obj or not date2_obj:
+                return False
+
+            return date1_obj == date2_obj
+        except Exception as e:
+            print(f"Tarih karşılaştırma hatası: {e}, date1={date1}, date2={date2}")
+            return False
+
+    def is_worker_on_offday(self, worker, check_date):
+        """Çalışanın belirtilen tarihte izinli olup olmadığını kontrol eder."""
+        off_days = worker.get_off_days()
+        if not off_days:
+            return False
+
+        try:
+            off_start = datetime.strptime(off_days[0], "%d.%m.%Y").date()
+            off_end = datetime.strptime(off_days[1], "%d.%m.%Y").date()
+            check_date_obj = check_date.date() if isinstance(check_date, datetime) else check_date
+
+            return off_start <= check_date_obj <= off_end
+        except Exception as e:
+            print(f"İzin günü kontrolü hatası ({worker.get_name()}): {e}")
+            return False
+
+    def is_same_date(self, date1, date2):
+        """İki tarihin aynı olup olmadığını kontrol eder."""
+        if isinstance(date1, datetime) and isinstance(date2, datetime):
+            return date1.date() == date2.date()
+
+        if hasattr(date1, 'date') and callable(getattr(date1, 'date')):
+            date1 = date1.date()
+
+        if hasattr(date2, 'date') and callable(getattr(date2, 'date')):
+            date2 = date2.date()
+
+        return date1 == date2
+
+    def is_time_in_range(self, interval, shift_range):
+        """Zaman aralığının vardiya saatleri içinde olup olmadığını kontrol eder."""
+        interval_start, interval_end = interval
+        shift_start, shift_end = shift_range
+
+        # Aralığın tamamen vardiya saatleri içinde olduğunu kontrol et
+        return shift_start <= interval_start and interval_end <= shift_end
     def initiate_assignment(self, max_attempts=100, recursion_level=0):
         """
         Atama işlemini başlatır ve kritik operasyonları işçilere atar.
@@ -469,57 +546,45 @@ class MainController:
         print(f"\n--- ATAMA BAŞLATIYOR - {len(self.__all_critical_operations)} operasyon için ---")
         assignment_made = False  # Herhangi bir atama yapıldı mı takip et
 
-        # Öncelikle operasyonları öncül durumlarına göre kategorize et
-        operations_with_no_preds = []
-        operations_with_completed_preds = []
-        operations_with_uncompleted_preds = []
+        # Operasyonları önceliklendir
+        prioritized_operations = self.__all_critical_operations.copy()
 
-        for product, operation in self.__all_critical_operations:
+        # Öncülü olmayan ya da tüm öncülleri tamamlanmış operasyonları öne al
+        prioritized_operations.sort(key=lambda po: len(po[1].get_uncompleted_prdecessors() or []))
+
+        print(f"\nÖnceliklendirilmiş operasyonlar ({len(prioritized_operations)}):")
+        for idx, (product, operation) in enumerate(prioritized_operations):
+            uncompleted = len(operation.get_uncompleted_prdecessors() or [])
+            print(
+                f"{idx + 1}. Ürün: {product.get_serial_number()}, Op: {operation.get_name()}, Tamamlanmamış öncül: {uncompleted}")
+
+        # Şimdi her operasyonu öncelik sırasına göre işle
+        for product, operation in prioritized_operations:
             # Zaten tamamlanmış operasyonları atla
             if operation.get_completed():
                 print(f"Operasyon {operation.get_name()} zaten tamamlanmış, atlanıyor.")
                 continue
 
-            # Öncül durumunu kontrol et
-            if not operation.get_predecessors() or len(operation.get_predecessors()) == 0:
-                # Öncül yok - hemen atanabilir
-                operations_with_no_preds.append((product, operation))
-                print(f"Operasyon {operation.get_name()} için öncül yok, doğrudan atama yapılabilir.")
-            else:
-                # Tüm öncüllerin tamamlanıp tamamlanmadığını kontrol et
-                uncompleted_preds = operation.get_uncompleted_prdecessors()
-                if not uncompleted_preds or len(uncompleted_preds) == 0:
-                    # Tüm öncüller tamamlanmış - atanabilir
-                    operations_with_completed_preds.append((product, operation))
-                    print(f"Operasyon {operation.get_name()} için tüm öncüller tamamlandı, atama yapılabilir.")
-                else:
-                    # Bazı öncüller tamamlanmamış - atamayı ertele
-                    operations_with_uncompleted_preds.append((product, operation))
-                    pred_names = [p.get_name() for p in uncompleted_preds]
-                    print(f"Operasyon {operation.get_name()} için tamamlanmamış öncüller var: {pred_names}")
-
-        # Operasyonları öncelik sırasına göre işle:
-        # 1. Öncülü olmayan operasyonlar
-        # 2. Tüm öncülleri tamamlanmış operasyonlar
-        # 3. Bazı tamamlanmamış öncülleri olan operasyonlar (kontrol yanlış olabilir diye deneme yap)
-        prioritized_operations = operations_with_no_preds + operations_with_completed_preds + operations_with_uncompleted_preds
-
-        print(f"\nÖnceliklendirilmiş operasyonlar:")
-        print(f"- Öncülsüz operasyonlar: {len(operations_with_no_preds)}")
-        print(f"- Tüm öncülleri tamamlanmış operasyonlar: {len(operations_with_completed_preds)}")
-        print(f"- Tamamlanmamış öncülleri olan operasyonlar: {len(operations_with_uncompleted_preds)}")
-
-        # Şimdi her operasyonu öncelik sırasına göre işle
-        for product, operation in prioritized_operations:
             print(f"\nÜrün {product.get_serial_number()}, Operasyon {operation.get_name()} için atama deneniyor...")
 
-            # Tamamlanmamış öncülleri olan operasyonlar için özel işlem
-            if operation.get_uncompleted_prdecessors() and len(operation.get_uncompleted_prdecessors()) > 0:
-                uncompleted_preds = [op.get_name() for op in operation.get_uncompleted_prdecessors()]
-                print(f"UYARI: Operasyon {operation.get_name()}'in tamamlanmamış öncülleri var: {uncompleted_preds}")
-                print(f"Bu operasyon için atama denenecek, ancak öncüllerin tamamlanması gerekebilir.")
+            # Tamamlanmamış öncüllerin durumunu kontrol et
+            uncompleted_preds = operation.get_uncompleted_prdecessors() or []
 
-                # Yine de devam et - atama yapmayı deneriz ancak kısıtlamalar nedeniyle başarısız olabilir
+            # Tamamlanmamış öncüller var mı kontrol et
+            if uncompleted_preds:
+                all_preds_assigned = True
+                pred_names = []
+
+                for pred in uncompleted_preds:
+                    pred_names.append(pred.get_name())
+                    if not pred.get_completed() and not self.is_predecessor_assigned(pred):
+                        all_preds_assigned = False
+                        print(f"    Öncül {pred.get_name()} tamamlanmamış ve atanmamış.")
+
+                if not all_preds_assigned:
+                    print(f"    Operasyon {operation.get_name()} için tüm öncüller tamamlanmadı/atanmadı: {pred_names}")
+                    print(f"    Bu operasyon daha sonra tekrar denenecek.")
+                    continue  # Bu operasyonu atla ve sonraki iterasyonda tekrar dene
 
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
             if not intervals_list:
@@ -530,6 +595,8 @@ class MainController:
 
             # 1. Önceki operasyonların en geç bitiş zamanını bul
             latest_finish_time = self.find_latest_finish_time_of_predecessors(operation)
+            if latest_finish_time:
+                print(f"  Öncüllerin en geç bitiş zamanı: {latest_finish_time}")
 
             # 2. Interval listesini en geç bitiş zamanından sonraki aralıklarla sınırla
             filtered_intervals = self.filter_intervals_after_time(intervals_list, latest_finish_time)
@@ -669,58 +736,115 @@ class MainController:
         """
         try:
             latest_finish_time = None
-            
-            # Önceki operasyonları al (operation.get_previous_operations() string döndürüyor)
-            previous_operations = operation.get_previous_operations() or []
-            print(f"  Operasyon {operation.get_name()} için {len(previous_operations)} önceki operasyon bulundu")
-            
-            # Eğer hiç önceki operasyon yoksa None döndür
-            if not previous_operations:
+            latest_pred_name = None
+
+            # Direkt olarak operation.get_predecessors() kullan
+            predecessors = operation.get_predecessors() or []
+
+            print(f"  Operasyon {operation.get_name()} için {len(predecessors)} doğrudan öncül bulundu")
+
+            # Hiç öncül yoksa None döndür
+            if not predecessors:
                 return None
-                
-            # Her önceki operasyon için
-            for prev_op_name in previous_operations:
-                # String olarak gelen operasyon adını kullanarak operasyon nesnesini bul
-                product = operation.get_product() if hasattr(operation, 'get_product') else None
-                
-                # Eğer ürün operasyondan alınamazsa, ürün listesinden bul
-                if not product:
-                    for p in self.__products:
-                        op_found = False
-                        for op in p.get_operations():
-                            if op == operation:
-                                product = p
-                                op_found = True
-                                break
-                        if op_found:
-                            break
-                
-                # Ürün bulunduysa, operasyon nesnesini al
-                if product:
-                    prev_op_obj = product.get_operation_by_name(prev_op_name)
-                    if prev_op_obj and prev_op_obj.get_end_datetime():
-                        if latest_finish_time is None or prev_op_obj.get_end_datetime() > latest_finish_time:
-                            latest_finish_time = prev_op_obj.get_end_datetime()
-                            print(f"    Önceki operasyon {prev_op_name} bitiş zamanı: {latest_finish_time}")
-                else:
-                    print(f"    UYARI: Operasyon {operation.get_name()} için ürün bulunamadı")
-                    
+
+            # Her öncül için
+            for pred_op in predecessors:
+                # Öncül tamamlanmış mı kontrol et
+                if pred_op.get_completed() and pred_op.get_end_datetime():
+                    # Bu öncülün bitiş zamanı daha geç mi kontrol et
+                    if latest_finish_time is None or pred_op.get_end_datetime() > latest_finish_time:
+                        latest_finish_time = pred_op.get_end_datetime()
+                        latest_pred_name = pred_op.get_name()
+                # Tamamlanmamış ama atanmış öncüller için
+                elif self.is_predecessor_assigned(pred_op):
+                    # Atanmış aralıklarda bu öncülü bul ve bitiş zamanını al
+                    end_time = self.find_assigned_end_time(pred_op)
+                    if end_time and (latest_finish_time is None or end_time > latest_finish_time):
+                        latest_finish_time = end_time
+                        latest_pred_name = pred_op.get_name()
+
+            if latest_finish_time:
+                print(f"    En geç biten öncül: {latest_pred_name}, Bitiş zamanı: {latest_finish_time}")
+            else:
+                print("    Hiçbir öncülün bitiş zamanı bulunamadı.")
+
             return latest_finish_time
-        
+
         except Exception as e:
             import traceback
             print(f"  Önceki operasyonların bitiş zamanını bulma hatası: {e}")
             print(traceback.format_exc())
             return None
 
+    def find_assigned_end_time(self, operation):
+        """
+        Atanmış bir operasyonun bitiş zamanını bulur.
+        """
+        try:
+            for date_obj in self.__ScheduleObject.dates:
+                for time_interval in date_obj.time_intervals:
+                    for assignment in time_interval.assignments:
+                        if len(assignment) >= 3 and assignment[2] == operation:
+                            # assignment format: (jig, product, operation, workers)
+                            # time_interval has interval (start_time, end_time)
+                            return time_interval.interval[1]  # End time of the interval
+            return None
+        except Exception as e:
+            print(f"  Atanmış operasyon bitiş zamanı bulma hatası: {e}")
+            return None
     def filter_intervals_after_time(self, intervals_list, start_time):
+        """
+        Belirtilen başlangıç zamanından sonraki zaman aralıklarını filtreler.
+        Gün değişimlerini de dikkate alır.
+        """
         if start_time is None:
             return intervals_list  # Eğer başlangıç zamanı yoksa, tüm interval listesini döndür
+
         filtered_intervals = []
+        next_day_flag = False
+        current_date = None
+
+        # Tüm aralıkları başlangıç zamanıyla karşılaştır
         for interval in intervals_list:
+            interval_date = interval.date if hasattr(interval, 'date') else None
             interval_start_time = interval.interval[0]  # Interval'ın başlangıç zamanı
-            if interval_start_time >= start_time:
+
+            # İlk tarihi sakla
+            if current_date is None and interval_date:
+                current_date = interval_date
+
+            # Eğer bir sonraki güne geçtiyse, tüm aralıkları ekle
+            if interval_date and current_date and interval_date > current_date:
+                next_day_flag = True
+
+            # Gün içinde ve zaman uygunsa veya bir sonraki günse ekle
+            if next_day_flag or (interval_start_time >= start_time):
                 filtered_intervals.append(interval)
+
+        print(f"  Filtrelenen aralıklar: Toplam {len(filtered_intervals)}, Sonraki güne geçildi mi: {next_day_flag}")
+
+        # Eğer hiç uygun aralık bulunamazsa ve son saat 20:00'den sonraysa, tüm sonraki günlerin aralıklarını ekle
+        if not filtered_intervals and start_time.hour >= 20:
+            print(f"  Geç saat nedeniyle ({start_time.hour}:00) sonraki günün tüm aralıkları ekleniyor.")
+            next_day_intervals = []
+            first_day_seen = False
+            current_date = None
+
+            for interval in intervals_list:
+                interval_date = interval.date if hasattr(interval, 'date') else None
+
+                # İlk tarihi belirle
+                if not first_day_seen and interval_date:
+                    first_day_seen = True
+                    current_date = interval_date
+                    continue
+
+                # Sonraki günlerin aralıklarını ekle
+                if first_day_seen and interval_date and interval_date > current_date:
+                    next_day_intervals.append(interval)
+
+            filtered_intervals = next_day_intervals
+            print(f"  Sonraki gün için eklenen aralık sayısı: {len(filtered_intervals)}")
 
         return filtered_intervals
 
@@ -729,31 +853,43 @@ class MainController:
         Önceki operasyonların bu zaman aralığında olup olmadığını kontrol eder.
         """
         try:
-            # Önce tüm öncüllerin tamamlanma durumunu kontrol et
-            # Eğer tamamlanmamış öncüller varsa, atama yapmak için öncüllerin durumunu
-            # daha ayrıntılı kontrol etmemiz gerekir
-            if operation.get_uncompleted_prdecessors() and len(operation.get_uncompleted_prdecessors()) > 0:
-                # Tamamlanmamış öncülleri kontrol et - hiçbiri bu aralıkta atanmamış olmalı
-                for pred in operation.get_uncompleted_prdecessors():
-                    # Bu aralıkta bu öncül için atama var mı kontrol et
-                    for assignment in time_interval.assignments:
-                        if len(assignment) >= 3 and assignment[2] == pred:
-                            # Öncül bu aralıkta atanmış, aynı aralıkta ardıl atamak güvenli değil
+            # Operasyonun tüm öncüllerini kontrol et
+            predecessors = operation.get_predecessors() or []
+
+            # Tamamlanmamış öncüller
+            uncompleted_preds = operation.get_uncompleted_prdecessors() or []
+
+            # Eğer tamamlanmamış öncüller varsa
+            if uncompleted_preds:
+                print(f"    Operasyon {operation.get_name()} için {len(uncompleted_preds)} tamamlanmamış öncül var.")
+
+                # Tüm tamamlanmamış öncüllerin tamamlanmış olması gerekir
+                for pred in uncompleted_preds:
+                    if not pred.get_completed():
+                        is_assigned = False
+
+                        # Bu öncül herhangi bir zaman aralığına atanmış mı kontrol et
+                        for date_obj in self.__ScheduleObject.dates:
+                            for interval in date_obj.time_intervals:
+                                for assignment in interval.assignments:
+                                    if len(assignment) >= 3 and assignment[2] == pred:
+                                        is_assigned = True
+                                        break
+
+                        # Eğer atanmamışsa, bu operasyon atanabilir
+                        if not is_assigned:
+                            print(f"    Öncül {pred.get_name()} henüz hiçbir aralığa atanmamış, atama yapılamaz.")
                             return False
 
-            # Standart kontrol: zaten bu aralıkta atanmış herhangi bir öncül var mı?
-            op = operation
-            interval = time_interval
+            # Bu aralıkta herhangi bir öncül çalışıyor mu kontrol et
+            for assignment in time_interval.assignments:
+                if len(assignment) >= 3:
+                    assigned_op = assignment[2]
+                    if assigned_op in predecessors:
+                        print(f"    Öncül {assigned_op.get_name()} bu aralıkta çalışıyor, atama yapılamaz.")
+                        return False
 
-            # Eğer assignments attribute'u boşsa kontrol etmeye gerek yok
-            if not hasattr(interval, 'assignments') or not interval.assignments:
-                return True  # Atama yapılabilir
-
-            for prev_op in op.get_previous_operations() or []:
-                for assignment in interval.assignments:
-                    if len(assignment) >= 3 and prev_op == assignment[2].get_name():
-                        return False  # Atama yapılamaz
-            return True  # Atama yapılabilir
+            return True
         except Exception as e:
             print(f"previous_operation_control hata: {e}")
             return True  # Hata durumunda varsayılan olarak atama yapılabilir
@@ -798,7 +934,7 @@ class MainController:
 
     def export_assignments_to_excel(self, file_path=None):
         """
-        Atama sonuçlarını bir Excel dosyasına yazar.
+        Atama sonuçlarını bir Excel dosyasına yazar. Her ürün için ayrı sayfa oluşturur.
         :param file_path: Excel dosyasının kaydedileceği yol (opsiyonel)
         """
         try:
@@ -818,39 +954,46 @@ class MainController:
 
             # Yeni bir Excel çalışma kitabı oluştur
             workbook = openpyxl.Workbook()
-            sheet = workbook.active
-            sheet.title = "Atama Sonuçları"
+            default_sheet = workbook.active
+            workbook.remove(default_sheet)  # Varsayılan sayfayı sil
 
-            # Başlık satırını oluştur
-            headers = ["Tarih", "Vardiya", "Saat Aralığı", "Jig", "Ürün", "Operasyon", "Çalışanlar"]
-            for col_num, header in enumerate(headers, 1):
-                sheet.cell(row=1, column=col_num, value=header).font = Font(bold=True)
+            # Her ürün için ayrı bir sayfa oluştur
+            for product in self.__products:
+                product_sn = product.get_serial_number()
+                sheet = workbook.create_sheet(title=f"Ürün {product_sn}")
 
-            # Atama sonuçlarını Excel'e yaz
-            row_num = 2
-            for date_obj in self.__ScheduleObject.dates:
-                date_str = date_obj.get_date().strftime('%d.%m.%Y') if hasattr(date_obj, 'get_date') else "Bilinmiyor"
+                # Başlık satırını oluştur
+                headers = ["Tarih", "Vardiya", "Saat Aralığı", "Jig", "Operasyon", "Çalışanlar"]
+                for col_num, header in enumerate(headers, 1):
+                    sheet.cell(row=1, column=col_num, value=header).font = Font(bold=True)
 
-                for time_interval in date_obj.time_intervals:
-                    interval_start = time_interval.interval[0].strftime('%H:%M')
-                    interval_end = time_interval.interval[1].strftime('%H:%M')
-                    time_range = f"{interval_start} - {interval_end}"
+                # Atama sonuçlarını Excel'e yaz
+                row_num = 2
+                for date_obj in self.__ScheduleObject.dates:
+                    date_str = date_obj.get_date().strftime('%d.%m.%Y') if hasattr(date_obj,
+                                                                                   'get_date') else "Bilinmiyor"
 
-                    for assignment in time_interval.assignments:
-                        if len(assignment) >= 4:  # (jig, product, operation, workers)
-                            jig, product, operation, workers = assignment
-                            worker_names = ", ".join([w.get_name() for w in workers]) if workers else "Atanmamış"
+                    for time_interval in date_obj.time_intervals:
+                        interval_start = time_interval.interval[0].strftime('%H:%M')
+                        interval_end = time_interval.interval[1].strftime('%H:%M')
+                        time_range = f"{interval_start} - {interval_end}"
 
-                            # Satırı Excel'e yaz
-                            sheet.cell(row=row_num, column=1, value=date_str)
-                            sheet.cell(row=row_num, column=2, value=time_interval.shift)
-                            sheet.cell(row=row_num, column=3, value=time_range)
-                            sheet.cell(row=row_num, column=4, value=jig.get_name())
-                            sheet.cell(row=row_num, column=5, value=product.get_serial_number())
-                            sheet.cell(row=row_num, column=6, value=operation.get_name())
-                            sheet.cell(row=row_num, column=7, value=worker_names)
+                        for assignment in time_interval.assignments:
+                            if len(assignment) >= 4:  # (jig, product, operation, workers)
+                                jig, assigned_product, operation, workers = assignment
+                                if assigned_product == product:  # Sadece bu ürüne ait atamaları yaz
+                                    worker_names = ", ".join(
+                                        [w.get_name() for w in workers]) if workers else "Atanmamış"
 
-                            row_num += 1
+                                    # Satırı Excel'e yaz
+                                    sheet.cell(row=row_num, column=1, value=date_str)
+                                    sheet.cell(row=row_num, column=2, value=time_interval.shift)
+                                    sheet.cell(row=row_num, column=3, value=time_range)
+                                    sheet.cell(row=row_num, column=4, value=jig.get_name())
+                                    sheet.cell(row=row_num, column=5, value=operation.get_name())
+                                    sheet.cell(row=row_num, column=6, value=worker_names)
+
+                                    row_num += 1
 
             # Excel dosyasını kaydet
             workbook.save(file_path)
@@ -1214,7 +1357,6 @@ class MainController:
 if __name__ == "__main__":
     main = MainController()
     main.run_GUI()
-    print("xd")
-    print("batushka")
+
 
 
