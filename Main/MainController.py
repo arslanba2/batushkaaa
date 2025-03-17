@@ -101,21 +101,48 @@ class MainController:
         print(f"product {product.get_serial_number()} progress % : {product.get_progress()}")
 
     def remove_completed_predecessors(self, _sn):
+        """
+        Tamamlanmış öncülleri kaldırır ve ilgili ardıl operasyonlarını günceller.
+        """
         product = self.get_product(_sn)
+        if not product:
+            print(f"Ürün bulunamadı: {_sn}")
+            return
+
         for operation in product.get_operations():
             if operation.get_completed():  # Tamamlanmış operasyon ise
-                successor_of_completed_operation = operation.get_successors()  # Tamamlanmış operasyonun ardıl listesi (operasyon objeleri)
-                for suc_op in successor_of_completed_operation:  # Her bir ardıl operasyon objesini dön
-                    suc_op_object = product.get_operation_by_name(suc_op)
-                    # Öncül listesini kopyala ve tamamlanmış öncülü çıkar
-                    uncomplete_predecessors = suc_op_object.get_predecessors().copy()
-                    for pre in suc_op_object.get_predecessors():
-                        if pre == operation:
-                            uncomplete_predecessors.remove(pre)
+                # Bu operasyonun hangi operasyonların öncülü olduğunu bul
+                for successor_name in operation.get_successors():
+                    successor_op = product.get_operation_by_name(successor_name)
+                    if successor_op:
+                        # Tamamlanmış öncülü uncompleted_predecessors listesinden çıkar
+                        uncomplete_predecessors = []
+                        for pre in successor_op.get_uncompleted_prdecessors():
+                            if pre != operation and not pre.get_completed():
+                                uncomplete_predecessors.append(pre)
 
-                    # Güncellenmiş öncül listesini uncompleted_predecessors olarak ayarla
-                    suc_op_object.set_uncompleted_prdecessors(uncomplete_predecessors)
+                        # Güncellenmiş listeyi ayarla
+                        successor_op.set_uncompleted_prdecessors(uncomplete_predecessors)
 
+                        print(
+                            f"Operasyon {successor_op.get_name()} için tamamlanan öncül {operation.get_name()} çıkarıldı.")
+                        print(f"Kalan tamamlanmamış öncüller: {[p.get_name() for p in uncomplete_predecessors]}")
+
+    def is_predecessor_assigned(self, operation):
+        """
+        Bir operasyona atama yapılmış mı kontrol eder.
+        """
+        if operation.get_completed():
+            return True
+
+        # Tüm zaman aralıklarını kontrol et
+        for date_obj in self.__ScheduleObject.dates:
+            for time_interval in date_obj.time_intervals:
+                for assignment in time_interval.assignments:
+                    if len(assignment) >= 3 and assignment[2] == operation:
+                        return True
+
+        return False
     # CPM calculation
     def set_critical_operations(self, _sn):
         """
@@ -128,8 +155,9 @@ class MainController:
                 print(f"Ürün bulunamadı: {_sn}")
                 return
 
-            # Tamamlanmamış operasyonları al ve grafa ekle
-            uncompleted_ops = [op for op in product.get_operations() if not op.get_completed()]
+            # Get all operations, including both completed and uncompleted ones
+            all_operations = product.get_operations()
+            uncompleted_ops = [op for op in all_operations if not op.get_completed()]
 
             if not uncompleted_ops:
                 print(f"Ürün {_sn} için tamamlanmamış operasyon bulunmuyor.")
@@ -138,65 +166,137 @@ class MainController:
 
             print(f"Ürün {_sn} için {len(uncompleted_ops)} tamamlanmamış operasyon var.")
 
-            # Kritik yol analizi için grafı oluştur
+            # Create a graph for critical path analysis
             g = SetCriticalOperation.Graph()
 
-            # Tüm tamamlanmamış operasyonları ekle
-            for operation in uncompleted_ops:
+            # First, add all operations to the graph, regardless of completion status
+            # This ensures proper path calculation and predecessor relationships
+            for operation in all_operations:
                 task_name = operation.get_name()
-                duration = operation.get_operating_duration() or 1.0  # Eğer süre tanımlanmamışsa 1.0 kullan
 
-                # Tamamlanmamış öncülleri al
+                # Use actual duration for uncompleted ops, zero for completed ones
+                # This ensures completed operations don't affect the critical path
+                duration = 0.0 if operation.get_completed() else (operation.get_operating_duration() or 1.0)
+
+                # Get all predecessors, not just uncompleted ones
                 dependencies = []
-                for predecessor in operation.get_uncompleted_prdecessors():
-                    if predecessor and hasattr(predecessor, 'get_name'):
-                        pred_name = predecessor.get_name()
-                        if pred_name:
-                            dependencies.append(pred_name)
+                if operation.get_predecessors():
+                    for predecessor in operation.get_predecessors():
+                        if predecessor and hasattr(predecessor, 'get_name'):
+                            pred_name = predecessor.get_name()
+                            if pred_name:
+                                dependencies.append(pred_name)
 
                 print(f"  Operasyon {task_name} ekleniyor, süre: {duration}, öncüller: {dependencies}")
                 g.add_task(task_name, duration, dependencies)
 
-            # Kritik yol analizini çalıştır
+            # Run the critical path analysis
             critical_operations, earliest_start, latest_finish = g.find_critical_operations()
 
             print(f"Kritik operasyonlar: {critical_operations}")
 
-            # Kritik operasyon nesnelerini oluştur
+            # Create critical operation objects list
             critical_op_obj_list = []
+
+            # First add critical uncompleted operations
             for op_name in critical_operations:
                 try:
                     op_obj = product.get_operation_by_name(op_name)
-                    if op_obj and not op_obj.get_completed():  # Sadece tamamlanmamış operasyonları ekle
-                        # Operasyon bilgilerini ayarla
-                        op_obj.set_early_start(earliest_start.get(op_name, {}))
+                    if op_obj and not op_obj.get_completed():
+                        # Set operation timing information
+                        op_obj.set_early_start(earliest_start.get(op_name, 0))
                         op_obj.set_late_finish(latest_finish.get(op_name, float('inf')))
+
+                        # Calculate slack time
+                        if hasattr(op_obj, 'set_slack'):
+                            slack = latest_finish.get(op_name, float('inf')) - (
+                                    earliest_start.get(op_name, 0) + (op_obj.get_operating_duration() or 1.0))
+                            op_obj.set_slack(slack)
+
                         critical_op_obj_list.append(op_obj)
                         print(f"  Kritik operasyon eklendi: {op_name}")
                 except Exception as e:
                     print(f"  Operasyon eklenirken hata: {op_name} - {e}")
 
-            # Eğer hiç kritik operasyon bulunmadıysa, tüm tamamlanmamış operasyonları kritik olarak işaretle
+            # If no critical operations found, include all uncompleted operations
             if not critical_op_obj_list:
                 print(f"  Kritik operasyon bulunamadı. Tüm tamamlanmamış operasyonlar kritik olarak işaretleniyor.")
-                critical_op_obj_list = uncompleted_ops
 
-            # Kritik operasyonları ürüne ekle
+                # Sort uncompleted operations by predecessor relationships
+                # Operations with no predecessors come first
+                uncompleted_ops_no_preds = []
+                uncompleted_ops_with_preds = []
+
+                for op in uncompleted_ops:
+                    if not op.get_predecessors() or len(op.get_predecessors()) == 0:
+                        uncompleted_ops_no_preds.append(op)
+                    else:
+                        uncompleted_ops_with_preds.append(op)
+
+                # Sort operations with predecessors by dependency depth
+                # (fewer predecessors come first)
+                uncompleted_ops_with_preds.sort(
+                    key=lambda op: len(op.get_predecessors()) if op.get_predecessors() else 0
+                )
+
+                # Combine the lists with no-predecessor operations first
+                critical_op_obj_list = uncompleted_ops_no_preds + uncompleted_ops_with_preds
+
+            # Else if critical operations found but some uncompleted operations are not included,
+            # consider adding them as well (with lower priority)
+            else:
+                critical_op_names = [op.get_name() for op in critical_op_obj_list]
+                missing_uncompleted_ops = [op for op in uncompleted_ops if op.get_name() not in critical_op_names]
+
+                if missing_uncompleted_ops:
+                    print(f"  {len(missing_uncompleted_ops)} tamamlanmamış operasyon kritik yol dışında kaldı.")
+                    print(f"  Bu operasyonlar da listeye daha düşük öncelikle ekleniyor.")
+
+                    # Sort missing operations by predecessor relationships
+                    missing_ops_no_preds = []
+                    missing_ops_with_preds = []
+
+                    for op in missing_uncompleted_ops:
+                        if not op.get_predecessors() or len(op.get_predecessors()) == 0:
+                            missing_ops_no_preds.append(op)
+                        else:
+                            missing_ops_with_preds.append(op)
+
+                    # Sort operations with predecessors by dependency depth
+                    missing_ops_with_preds.sort(
+                        key=lambda op: len(op.get_predecessors()) if op.get_predecessors() else 0
+                    )
+
+                    # Add missing operations after critical ones
+                    critical_op_obj_list.extend(missing_ops_no_preds)
+                    critical_op_obj_list.extend(missing_ops_with_preds)
+
+            # Update product's critical operations list
             print(f"Toplam {len(critical_op_obj_list)} kritik operasyon bulundu.")
             product.append_critical_operations(critical_op_obj_list)
+
+            # Debug output - show operation dependencies
+            for op in critical_op_obj_list:
+                pred_names = [p.get_name() for p in op.get_predecessors()] if op.get_predecessors() else []
+                uncompleted_pred_names = [p.get_name() for p in
+                                          op.get_uncompleted_prdecessors()] if op.get_uncompleted_prdecessors() else []
+                print(f"  Operasyon: {op.get_name()}")
+                print(f"    Tüm öncüller: {pred_names}")
+                print(f"    Tamamlanmamış öncüller: {uncompleted_pred_names}")
 
         except Exception as e:
             import traceback
             print(f"Kritik operasyonları belirlerken hata oluştu: {e}")
             print(traceback.format_exc())
-            # Hata durumunda varsayılan olarak tüm tamamlanmamış operasyonları kritik olarak işaretle
+
+            # In case of error, mark all uncompleted operations as critical
             try:
                 uncompleted_ops = [op for op in product.get_operations() if not op.get_completed()]
                 product.append_critical_operations(uncompleted_ops)
                 print(
                     f"Hata durumunda {len(uncompleted_ops)} tamamlanmamış operasyon kritik operasyon olarak işaretlendi.")
             except:
-                # En kötü durumda boş liste kullan
+                # In the worst case, use an empty list
                 product.append_critical_operations([])
 
     def append_all_critical_operations(self):
@@ -211,7 +311,7 @@ class MainController:
             # Tamamlanmamış kritik operasyonları al
             incomplete_critical_ops = [op for op in critical_ops if not op.get_completed()]
 
-            # İki gruba ayır: tamamlanmamış öncülü olanlar ve olmayanlar
+            # İki gruba ayır: tamamlanmamış öncülü olmayanlar ve olanlar
             ops_with_no_preds = []
             ops_with_preds = []
 
@@ -219,12 +319,15 @@ class MainController:
                 if not op.get_uncompleted_prdecessors() or len(op.get_uncompleted_prdecessors()) == 0:
                     ops_with_no_preds.append((product, op))
                 else:
+                    # Tamamlanmamış öncüllerin sayısına göre sırala (daha az öncülü olanları önce)
+                    op.remaining_pred_count = len(op.get_uncompleted_prdecessors())
                     ops_with_preds.append((product, op))
 
-            # Önce tamamlanmamış öncülü olmayanları ekle
+            # Öncülü olmayanları ekle
             self.__all_critical_operations.extend(ops_with_no_preds)
 
-            # Sonra öncülü olanları ekle
+            # Öncülü olanları tamamlanmamış öncül sayısına göre sırala
+            ops_with_preds.sort(key=lambda x: getattr(x[1], 'remaining_pred_count', float('inf')))
             self.__all_critical_operations.extend(ops_with_preds)
 
         print(f"Toplam {len(self.__all_critical_operations)} kritik operasyon toplandı.")
@@ -233,8 +336,12 @@ class MainController:
         for idx, (product, op) in enumerate(self.__all_critical_operations):
             uncompleted_preds = [p.get_name() for p in
                                  op.get_uncompleted_prdecessors()] if op.get_uncompleted_prdecessors() else []
+            all_preds = [p.get_name() for p in op.get_predecessors()] if op.get_predecessors() else []
+
             print(f"  {idx + 1}. Ürün: {product.get_serial_number()}, Operasyon: {op.get_name()}")
+            print(f"     Tüm öncüller: {all_preds}")
             print(f"     Tamamlanmamış öncüller: {uncompleted_preds}")
+            print(f"     Tamamlanmamış öncül sayısı: {getattr(op, 'remaining_pred_count', 'Bilinmiyor')}")
     def sort_operations_by_duration(self):
         for product in self.__products:
             criticalops = product.get_critical_operations()
@@ -362,23 +469,57 @@ class MainController:
         print(f"\n--- ATAMA BAŞLATIYOR - {len(self.__all_critical_operations)} operasyon için ---")
         assignment_made = False  # Herhangi bir atama yapıldı mı takip et
 
-        # Her kritik operasyon için atama yap
-        remaining_operations = self.__all_critical_operations.copy()
+        # Öncelikle operasyonları öncül durumlarına göre kategorize et
+        operations_with_no_preds = []
+        operations_with_completed_preds = []
+        operations_with_uncompleted_preds = []
 
         for product, operation in self.__all_critical_operations:
-            # Operasyon zaten tamamlanmışsa atla
+            # Zaten tamamlanmış operasyonları atla
             if operation.get_completed():
                 print(f"Operasyon {operation.get_name()} zaten tamamlanmış, atlanıyor.")
                 continue
 
-            # Tamamlanmamış öncül kontrolü
+            # Öncül durumunu kontrol et
+            if not operation.get_predecessors() or len(operation.get_predecessors()) == 0:
+                # Öncül yok - hemen atanabilir
+                operations_with_no_preds.append((product, operation))
+                print(f"Operasyon {operation.get_name()} için öncül yok, doğrudan atama yapılabilir.")
+            else:
+                # Tüm öncüllerin tamamlanıp tamamlanmadığını kontrol et
+                uncompleted_preds = operation.get_uncompleted_prdecessors()
+                if not uncompleted_preds or len(uncompleted_preds) == 0:
+                    # Tüm öncüller tamamlanmış - atanabilir
+                    operations_with_completed_preds.append((product, operation))
+                    print(f"Operasyon {operation.get_name()} için tüm öncüller tamamlandı, atama yapılabilir.")
+                else:
+                    # Bazı öncüller tamamlanmamış - atamayı ertele
+                    operations_with_uncompleted_preds.append((product, operation))
+                    pred_names = [p.get_name() for p in uncompleted_preds]
+                    print(f"Operasyon {operation.get_name()} için tamamlanmamış öncüller var: {pred_names}")
+
+        # Operasyonları öncelik sırasına göre işle:
+        # 1. Öncülü olmayan operasyonlar
+        # 2. Tüm öncülleri tamamlanmış operasyonlar
+        # 3. Bazı tamamlanmamış öncülleri olan operasyonlar (kontrol yanlış olabilir diye deneme yap)
+        prioritized_operations = operations_with_no_preds + operations_with_completed_preds + operations_with_uncompleted_preds
+
+        print(f"\nÖnceliklendirilmiş operasyonlar:")
+        print(f"- Öncülsüz operasyonlar: {len(operations_with_no_preds)}")
+        print(f"- Tüm öncülleri tamamlanmış operasyonlar: {len(operations_with_completed_preds)}")
+        print(f"- Tamamlanmamış öncülleri olan operasyonlar: {len(operations_with_uncompleted_preds)}")
+
+        # Şimdi her operasyonu öncelik sırasına göre işle
+        for product, operation in prioritized_operations:
+            print(f"\nÜrün {product.get_serial_number()}, Operasyon {operation.get_name()} için atama deneniyor...")
+
+            # Tamamlanmamış öncülleri olan operasyonlar için özel işlem
             if operation.get_uncompleted_prdecessors() and len(operation.get_uncompleted_prdecessors()) > 0:
                 uncompleted_preds = [op.get_name() for op in operation.get_uncompleted_prdecessors()]
-                print(
-                    f"Operasyon {operation.get_name()}'in tamamlanmamış öncülleri var: {uncompleted_preds}, atlanıyor.")
-                continue
+                print(f"UYARI: Operasyon {operation.get_name()}'in tamamlanmamış öncülleri var: {uncompleted_preds}")
+                print(f"Bu operasyon için atama denenecek, ancak öncüllerin tamamlanması gerekebilir.")
 
-            print(f"\nÜrün {product.get_serial_number()}, Operasyon {operation.get_name()} için atama deneniyor...")
+                # Yine de devam et - atama yapmayı deneriz ancak kısıtlamalar nedeniyle başarısız olabilir
 
             intervals_list = self.get_ScheduleObject().get_sorted_time_intervals()
             if not intervals_list:
@@ -400,7 +541,9 @@ class MainController:
 
             for interval_idx, interval in enumerate(filtered_intervals):
                 interval_time = f"{interval.interval[0].strftime('%H:%M')}-{interval.interval[1].strftime('%H:%M')}"
-                print(f"  Aralık {interval_idx + 1}: {interval_time}, Vardiya: {interval.shift}")
+                interval_date = interval.date.strftime('%d.%m.%Y') if hasattr(interval,
+                                                                              'date') and interval.date else "Bilinmiyor"
+                print(f"  Aralık {interval_idx + 1}: {interval_date} {interval_time}, Vardiya: {interval.shift}")
 
                 # 1. Önceki operasyonların bu aralıkta olup olmadığını kontrol et
                 if not self.previous_operation_control(operation, interval):
@@ -448,14 +591,13 @@ class MainController:
                         # Operasyonun tamamlandığını işaretle ve kritik yolu güncelle
                         self.set_critical_operations(product.get_serial_number())
                         break
-
                 else:
                     # Yeterli çalışan kontrolü
                     if not self.compatible_worker_number_check(operation, interval):
                         print("    Yeterli sayıda uygun çalışan yok, atama yapılamaz.")
                         continue
 
-                    # Jig uygunluğu kontrolü
+                    # Jig uygunluğu kontrolü ve gerekirse değiştir
                     if not self.jig_compatibility_control(product, operation):
                         print("    Jig uygun değil, jig değiştiriliyor...")
                         self.change_jig(product, operation)
@@ -487,6 +629,7 @@ class MainController:
                         self.set_critical_operations(product.get_serial_number())
                         break
 
+                # Son aralık için maksimum deneme sayısı kontrolü
                 if not op_assignment_made and interval == last_interval:
                     last_interval_attempts += 1
                     if last_interval_attempts >= max_attempts:
@@ -494,7 +637,7 @@ class MainController:
                             f"Maksimum deneme sayısına ulaşıldı. Product: {product.get_serial_number()}, Operation: {operation.get_name()}")
                         continue
 
-        print(f"\n--- ATAMA SONUÇLARI: {assignment_made}---")
+        print(f"\n--- ATAMA SONUÇLARI: {'Başarılı' if assignment_made else 'Başarısız'} ---")
 
         # Eğer en az bir atama yapıldıysa, recursive olarak devam et
         if assignment_made:
@@ -586,13 +729,26 @@ class MainController:
         Önceki operasyonların bu zaman aralığında olup olmadığını kontrol eder.
         """
         try:
+            # Önce tüm öncüllerin tamamlanma durumunu kontrol et
+            # Eğer tamamlanmamış öncüller varsa, atama yapmak için öncüllerin durumunu
+            # daha ayrıntılı kontrol etmemiz gerekir
+            if operation.get_uncompleted_prdecessors() and len(operation.get_uncompleted_prdecessors()) > 0:
+                # Tamamlanmamış öncülleri kontrol et - hiçbiri bu aralıkta atanmamış olmalı
+                for pred in operation.get_uncompleted_prdecessors():
+                    # Bu aralıkta bu öncül için atama var mı kontrol et
+                    for assignment in time_interval.assignments:
+                        if len(assignment) >= 3 and assignment[2] == pred:
+                            # Öncül bu aralıkta atanmış, aynı aralıkta ardıl atamak güvenli değil
+                            return False
+
+            # Standart kontrol: zaten bu aralıkta atanmış herhangi bir öncül var mı?
             op = operation
             interval = time_interval
-            
+
             # Eğer assignments attribute'u boşsa kontrol etmeye gerek yok
             if not hasattr(interval, 'assignments') or not interval.assignments:
                 return True  # Atama yapılabilir
-                
+
             for prev_op in op.get_previous_operations() or []:
                 for assignment in interval.assignments:
                     if len(assignment) >= 3 and prev_op == assignment[2].get_name():
@@ -775,63 +931,83 @@ class MainController:
     def compatible_worker_number_check(self, operation, time_interval):
         """
         Operasyon için yeterli sayıda uygun çalışan olup olmadığını kontrol eder.
-        Beceri kontrollerini esnetilmiş bir şekilde yapar.
+        Beceri kontrollerini esnetilmiş bir şekilde yapar ve daha az atanmış çalışanları önceliklendirir.
         """
         try:
             required_skills = operation.get_required_skills()
             print(f"    Gereken beceriler: {required_skills}")
-            
+
             available_workers = getattr(time_interval, 'available_workers', []) or []
             print(f"    Mevcut çalışan sayısı: {len(available_workers)}")
-            
+
             if not available_workers:
                 print(f"    HATA: Zaman aralığında uygun çalışan bulunamadı!")
                 # Atama için test amaçlı tüm çalışanları ekleyelim
                 time_interval.available_workers = self.__workers
                 available_workers = self.__workers
                 print(f"    TÜM ÇALIŞANLAR ATANDI: {len(available_workers)} çalışan")
-                
+
             # Becerilere göre filtreleme yapalım, ancak çok katı olmayalım
             skilled_workers = []
-            
+
             # Önce her çalışanın becerilerini görelim
             for idx, w in enumerate(available_workers):
                 worker_skills = w.get_skills()
-                print(f"    Çalışan {idx+1}: {w.get_name()}, Becerileri: {worker_skills}")
-                
+
+                # Her işçinin atanma sayısını hesapla (eğer atanma bilgisi yoksa 0 olarak kabul et)
+                assignment_count = 0
+                for date_obj in self.__ScheduleObject.dates:
+                    for time_int in date_obj.time_intervals:
+                        for assignment in time_int.assignments:
+                            if len(assignment) >= 4:  # (jig, product, operation, workers)
+                                workers_in_assignment = assignment[3]
+                                if w in workers_in_assignment:
+                                    assignment_count += 1
+
+                # İşçi nesnesine atanma sayısını geçici olarak ekle
+                w.assignment_count = assignment_count
+
+                print(
+                    f"    Çalışan {idx + 1}: {w.get_name()}, Becerileri: {worker_skills}, Atanma Sayısı: {assignment_count}")
+
                 # Eğer worker_skills None veya boş string ise, tüm becerilere sahip olarak kabul edelim
                 if not worker_skills:
                     skilled_workers.append(w)
                     continue
-                    
+
                 # Eğer required_skills None veya boş string ise, tüm çalışanları ekleyelim
                 if not required_skills:
                     skilled_workers.append(w)
                     continue
-                    
+
                 # Beceri kontrolünü esnetelim - tam eşleşme yerine, içerme kontrolü yapalım
                 if isinstance(worker_skills, str) and isinstance(required_skills, str):
                     if required_skills.lower() in worker_skills.lower():
                         skilled_workers.append(w)
                         continue
-                
+
                 # Diğer kontroller - Set veya liste olma durumu
                 if isinstance(worker_skills, (set, list)) and required_skills in worker_skills:
                     skilled_workers.append(w)
                     continue
-                    
+
                 # En son çare - her durumda çalışanları ekleyelim (test amaçlı)
                 skilled_workers.append(w)
-                
+
+            # İşçileri atama sayısına göre sırala (en az atanmış olanlar önce)
+            skilled_workers.sort(key=lambda w: getattr(w, 'assignment_count', 0))
+
             required_worker_count = operation.get_required_worker() or 1
             print(f"    Gereken çalışan: {required_worker_count}, Uygun becerili çalışan: {len(skilled_workers)}")
-            
+            print(
+                f"    Sıralanmış çalışanlar (atanma sayısına göre): {', '.join([f'{w.get_name()} ({getattr(w, 'assignment_count', 0)})' for w in skilled_workers[:5]])}")
+
             if skilled_workers:
                 # İhtiyaç duyulan çalışan sayısı kadar çalışan seçildiğinden emin olalım
                 time_interval.available_workers = skilled_workers
-                
+
             return len(skilled_workers) >= required_worker_count
-            
+
         except Exception as e:
             import traceback
             print(f"    Çalışan sayısı kontrolü hatası: {e}")
@@ -857,12 +1033,33 @@ class MainController:
                 if not available_workers and self.__workers:
                     # Çalışan yoksa tüm çalışanları dene
                     print(f"    TÜM ÇALIŞANLARA BAŞVURULUYOR: {len(self.__workers)} çalışan")
-                    available_workers = self.__workers[:required_worker_count]
+
+                    # Tüm çalışanları atanma sayısına göre sırala
+                    sorted_workers = sorted(self.__workers,
+                                            key=lambda w: sum(1 for date_obj in self.__ScheduleObject.dates
+                                                              for t_int in date_obj.time_intervals
+                                                              for assign in t_int.assignments
+                                                              if len(assign) >= 4 and w in assign[3]))
+
+                    available_workers = sorted_workers[:required_worker_count]
 
             # Hala çalışan yoksa, boş liste kullan
             if not available_workers:
                 print(f"    UYARI: Hiç çalışan bulunamadı! Atama boş çalışan listesiyle yapılacak.")
                 available_workers = []
+
+            # Atanacak çalışanların atanma sayılarını göster
+            worker_info = []
+            for w in available_workers:
+                assignment_count = 0
+                for date_obj in self.__ScheduleObject.dates:
+                    for t_int in date_obj.time_intervals:
+                        for assign in t_int.assignments:
+                            if len(assign) >= 4 and w in assign[3]:
+                                assignment_count += 1
+                worker_info.append(f"{w.get_name()} ({assignment_count} atama)")
+
+            print(f"    Atanacak çalışanlar ve mevcut atama sayıları: {', '.join(worker_info)}")
 
             # Çalışan listesini oluştur
             worker_names = [w.get_name() for w in available_workers] if available_workers else ["Atanmamış"]
