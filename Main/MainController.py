@@ -1357,6 +1357,6 @@ class MainController:
 if __name__ == "__main__":
     main = MainController()
     main.run_GUI()
-
+    print("batushka")
 
 
